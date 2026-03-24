@@ -118,15 +118,3 @@ std::string tokenTypeToString(TokenType type) {
         default: return "UNKNOWN";
     }
 }
-// int main() {
-//     std::string query = "SELECT name FROM student WHERE id = 1;";
-//     Tokenizer tokenizer(query);
-
-//     auto tokens = tokenizer.tokenize();
-//     for (auto &t : tokens) {
-//         std::cout << tokenTypeToString(t.type) 
-//                   << " -> " << t.value << std::endl;
-//     }
-
-//     return 0;
-// }

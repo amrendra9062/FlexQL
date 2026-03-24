@@ -2,19 +2,30 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Iinclude
 
-# Source files (based on your tree)
-SRC = main.cpp \
-      src/parser/tokenizer.cpp \
-      src/parser/parser.cpp
+# Directories
+SRC_DIR = src
+BUILD_DIR = build
 
-# Output executable
-TARGET = flexql_test
+# Find all source files
+SRC = $(shell find $(SRC_DIR) -name "*.cpp")
+
+# Object files
+OBJ = $(SRC:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+
+# Target
+TARGET = flexql
 
 # Default target
 all: $(TARGET)
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) $(SRC) -o $(TARGET)
+# Link step
+$(TARGET): $(OBJ)
+	$(CXX) $(CXXFLAGS) $(OBJ) -o $(TARGET)
+
+# Compile step
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Run
 run: $(TARGET)
@@ -22,4 +33,4 @@ run: $(TARGET)
 
 # Clean
 clean:
-	rm -f $(TARGET)
+	rm -rf $(BUILD_DIR) $(TARGET)
