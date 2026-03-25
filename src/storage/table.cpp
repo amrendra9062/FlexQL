@@ -10,6 +10,20 @@ void Table::insert(const Row& row) {
     }
 
     rows.push_back(row);
+
+    // --------- INDEX UPDATE ---------
+    std::string key;
+
+    std::visit([&](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::string>) {
+            key = arg;
+        } else {
+            key = std::to_string(arg);
+        }
+    }, row.get_values()[0]); // first column (id)
+
+    index.insert(key, row);
 }
 
 std::vector<Row> Table::get_all_rows() const {
@@ -27,4 +41,7 @@ std::vector<Row> Table::get_all_rows() const {
 
 const Schema& Table::get_schema() const {
     return schema;
+}
+std::vector<Row> Table::get_rows_by_index(const std::string& key) {
+    return index.search(key);
 }

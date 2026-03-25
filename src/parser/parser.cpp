@@ -33,7 +33,7 @@ Query Parser::parseSelect() {
 
     get(); // consume SELECT
 
-    // columns
+    // ------------------ COLUMNS ------------------
     if (match(TokenType::STAR)) {
         query.selectQuery.select_all = true;
     } else {
@@ -45,7 +45,7 @@ Query Parser::parseSelect() {
         }
     }
 
-    // FROM
+    // ------------------ FROM ------------------
     if (!match(TokenType::FROM)) {
         throw std::runtime_error("Expected FROM");
     }
@@ -53,7 +53,51 @@ Query Parser::parseSelect() {
     // table name
     query.selectQuery.table = get().value;
 
-    // WHERE (optional)
+    // ------------------ JOIN ------------------
+    if (match(TokenType::INNER)) {
+        if (!match(TokenType::JOIN)) {
+            throw std::runtime_error("Expected JOIN after INNER");
+        }
+
+        query.selectQuery.has_join = true;
+        query.selectQuery.join_table = get().value;
+
+        if (!match(TokenType::ON)) {
+            throw std::runtime_error("Expected ON in JOIN");
+        }
+
+        // LEFT side: student . id
+        std::string left_table = get().value;
+
+        if (!match(TokenType::UNKNOWN)) {  // '.'
+            throw std::runtime_error("Expected '.' in JOIN");
+        }
+
+        std::string left_column = get().value;
+
+        // =
+        if (!match(TokenType::EQUAL)) {
+            throw std::runtime_error("Expected '=' in JOIN");
+        }
+
+        // RIGHT side: marks . id
+        std::string right_table = get().value;
+
+        if (!match(TokenType::UNKNOWN)) {  // '.'
+            throw std::runtime_error("Expected '.' in JOIN");
+        }
+
+        std::string right_column = get().value;
+
+        query.selectQuery.join_condition = {
+            left_table,
+            left_column,
+            right_table,
+            right_column
+        };
+    }
+
+    // ------------------ WHERE ------------------
     if (match(TokenType::WHERE)) {
         query.selectQuery.where = parseWhere();
         query.selectQuery.has_where = true;
