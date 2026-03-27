@@ -1,260 +1,312 @@
 #include "query/executor.h"
-#include <iostream>
 #include <ctime>
-#include <type_traits>
+#include <algorithm>
+#include <iostream>
 #include <unordered_map>
-#include <chrono>
 
-// helper
-Value convertValue(const std::string& val) {
-    if (!val.empty() && std::isdigit(val[0])) {
-        return std::stoi(val);
+// ---------- TYPE CASTING HELPER ----------
+Value convertValue(const std::string& val, DataType type) {
+    if (type == DataType::INT) return std::stoi(val);
+    if (type == DataType::DECIMAL) return std::stod(val);
+    if (type == DataType::DATETIME) return std::stoll(val);
+    
+    if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'') {
+        return val.substr(1, val.size() - 2);
     }
     return val;
 }
 
-
-void Executor::execute(const Query& query) {
-    switch (query.type) {
-        case QueryType::CREATE:
-            executeCreate(query.createQuery);
-            break;
-        case QueryType::INSERT:
-            executeInsert(query.insertQuery);
-            break;
-        case QueryType::SELECT:
-            executeSelect(query.selectQuery);
-            break;
-        default:
-            throw std::runtime_error("Unknown query type");
-    }
+// ---------- DOUBLE FORMATTING HELPER ----------
+std::string formatDouble(double d) {
+    std::string s = std::to_string(d);
+    s.erase(s.find_last_not_of('0') + 1, std::string::npos);
+    if (s.back() == '.') s.pop_back();
+    return s;
 }
 
-void Executor::executeCreate(const CreateQuery& query) {
+// ---------- EXECUTE DISPATCHER ----------
+std::string Executor::execute(const Query& query) {
+    if (query.type == QueryType::CREATE) return executeCreate(query.createQuery);
+    if (query.type == QueryType::INSERT) return executeInsert(query.insertQuery);
+    if (query.type == QueryType::SELECT) return executeSelect(query.selectQuery);
+    if (query.type == QueryType::DELETE) return executeDelete(query.deleteQuery);
+    return "Error: Unknown query type\n";
+}
+
+// ---------- CREATE ----------
+std::string Executor::executeCreate(const CreateQuery& query) {
+    if (query.if_not_exists && db.has_table(query.table)) return "Table already exists\n";
+
     std::vector<Column> cols;
-
     for (auto& col : query.columns) {
-        DataType type;
-
+        DataType type = DataType::VARCHAR;
         if (col.second == "INT") type = DataType::INT;
-        else if (col.second == "VARCHAR") type = DataType::VARCHAR;
-        else type = DataType::VARCHAR;
-
+        else if (col.second == "DECIMAL") type = DataType::DECIMAL;
+        else if (col.second == "DATETIME") type = DataType::DATETIME;
         cols.push_back({col.first, type});
     }
 
-    Schema schema(query.table, cols);
-    db.create_table(schema);
-
-    std::cout << "Table created\n";
+    db.create_table(Schema(query.table, cols));
+    return "Table created\n";
 }
 
-void Executor::executeInsert(const InsertQuery& query) {
-    std::vector<Value> values;
-
-    for (auto& v : query.values) {
-        values.push_back(convertValue(v));
-    }
-
-    long long expiry = std::time(nullptr) + 1000;
-
-    Row row(values, expiry);
-    db.get_table(query.table).insert(row);
-
-    std::cout << "Row inserted\n";
+// ---------- DELETE ----------
+std::string Executor::executeDelete(const DeleteQuery& query) {
+    if (!db.has_table(query.table)) return "Error: Table not found\n";
+    return std::to_string(db.get_table(query.table).delete_all_rows()) + " rows deleted\n";
 }
 
-void Executor::executeSelect(const SelectQuery& query) {
-    auto start = std::chrono::high_resolution_clock::now();
+// ---------- BATCH INSERT ----------
+std::string Executor::executeInsert(const InsertQuery& query) {
+    if (!db.has_table(query.table)) return "Error: Table not found\n";
+    
+    Table& table = db.get_table(query.table);
+    const auto& cols = table.get_schema().get_columns();
 
-    std::string cache_key = query.table;
-
-    if (query.has_where) {
-        cache_key += "_WHERE_" + query.where.column + "_" + query.where.value;
-    }
-
-    // ------------------ CACHE HIT ------------------
-    if (cache.exists(cache_key)) {
-        auto rows = cache.get(cache_key);
-
-        std::cout << "Result (from cache):\n";
-
-        for (const auto& r : rows) {
-            for (const auto& v : r.get_values()) {
-                std::visit([](auto&& arg) {
-                    std::cout << arg << " ";
-                }, v);
-            }
-            std::cout << "\n";
+    int inserted = 0;
+    for (const auto& row_strs : query.rows) {
+        std::vector<Value> values;
+        long long expiry = std::time(nullptr) + 31536000; 
+        
+        for (size_t i = 0; i < row_strs.size() && i < cols.size(); ++i) {
+            values.push_back(convertValue(row_strs[i], cols[i].type));
+            if (cols[i].name == "EXPIRES_AT") expiry = std::stoll(row_strs[i]);
         }
-
-        auto end = std::chrono::high_resolution_clock::now();
-        std::cout << "Time: "
-                  << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
-                  << " us\n";
-
-        return;
+        table.insert(Row(values, expiry));
+        inserted++;
     }
+    return std::to_string(inserted) + " rows inserted\n";
+}
 
-    std::cout << "Result (computed):\n";
-    std::vector<Row> result_rows;
+// ---------- SELECT ENGINE ----------
+std::string Executor::executeSelect(const SelectQuery& query) {
+    if (!db.has_table(query.table)) return "Error: Table not found\n";
+    
+    Table& table = db.get_table(query.table);
+    auto rows = table.get_all_rows(); 
+    const auto& cols = table.get_schema().get_columns();
 
-    // ------------------ NO JOIN ------------------
+    // Helper: Map table.column to index
+    auto get_col_idx = [&](const std::string& name, const std::vector<Column>& columns) -> int {
+        std::string search_name = name;
+        size_t dot_pos = search_name.find('.');
+        if (dot_pos != std::string::npos) search_name = search_name.substr(dot_pos + 1);
+        
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (columns[i].name == search_name) return i;
+        }
+        return -1;
+    };
+
+    // --- STANDARD SELECT (NO JOIN) ---
     if (!query.has_join) {
-        auto& table = db.get_table(query.table);
-        const auto& schema = table.get_schema();
-
-        // -------- INDEX --------
-        if (query.has_where && query.where.column == schema.get_columns()[0].name) {
-            auto indexed_rows = table.get_rows_by_index(query.where.value);
-
-            for (const auto& r : indexed_rows) {
-                result_rows.push_back(r);
-
-                for (const auto& v : r.get_values()) {
-                    std::visit([](auto&& arg) {
-                        std::cout << arg << " ";
-                    }, v);
-                }
-                std::cout << "\n";
-            }
-
-            cache.put(cache_key, result_rows);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            std::cout << "Time: "
-                      << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
-                      << " us\n";
-
-            return;
-        }
-
-        auto rows = table.get_all_rows();
-
-        int condition_idx = -1;
-
+        int where_idx = -1;
+        double where_val_num = 0;
+        std::string where_val_str = "";
+        
         if (query.has_where) {
-            for (size_t i = 0; i < schema.get_columns().size(); i++) {
-                if (schema.get_columns()[i].name == query.where.column) {
-                    condition_idx = i;
-                    break;
-                }
+            where_idx = get_col_idx(query.where.column, cols);
+            if (where_idx == -1) return "Error: Column not found in WHERE\n";
+            DataType type = cols[where_idx].type;
+            if (type == DataType::DECIMAL || type == DataType::INT) where_val_num = std::stod(query.where.value);
+            else {
+                where_val_str = query.where.value;
+                if (where_val_str.front() == '\'') where_val_str = where_val_str.substr(1, where_val_str.size() - 2);
             }
         }
 
+        std::vector<const Row*> matched_rows;
         for (const auto& r : rows) {
             bool match = true;
-
             if (query.has_where) {
-                std::string val_str;
-
                 std::visit([&](auto&& arg) {
                     using T = std::decay_t<decltype(arg)>;
-                    if constexpr (std::is_same_v<T, std::string>) {
-                        val_str = arg;
-                    } else {
-                        val_str = std::to_string(arg);
+                    if constexpr (std::is_same_v<T, double> || std::is_same_v<T, int> || std::is_same_v<T, long long>) {
+                        double val = static_cast<double>(arg);
+                        if (query.where.op == "=" && val != where_val_num) match = false;
+                        else if (query.where.op == ">" && val <= where_val_num) match = false;
+                        else if (query.where.op == "<" && val >= where_val_num) match = false;
+                        else if (query.where.op == ">=" && val < where_val_num) match = false;
+                        else if (query.where.op == "<=" && val > where_val_num) match = false;
+                    } 
+                    else if constexpr (std::is_same_v<T, std::string>) {
+                        if (query.where.op == "=" && arg != where_val_str) match = false;
                     }
-                }, r.get_values()[condition_idx]);
-
-                if (val_str != query.where.value) {
-                    match = false;
-                }
+                }, r.get_values()[where_idx]);
             }
+            if (match) matched_rows.push_back(&r);
+        }
 
-            if (match) {
-                result_rows.push_back(r);
+        int order_idx = -1;
+        if (query.has_order_by) {
+            order_idx = get_col_idx(query.order_by.column, cols);
+            if (order_idx == -1) return "Error: Column not found in ORDER BY\n";
+            std::sort(matched_rows.begin(), matched_rows.end(), [&](const Row* a, const Row* b) {
+                bool res = false;
+                std::visit([&](auto&& val_a, auto&& val_b) {
+                    using T_A = std::decay_t<decltype(val_a)>;
+                    using T_B = std::decay_t<decltype(val_b)>;
+                    if constexpr (std::is_same_v<T_A, T_B>) {
+                        res = query.order_by.descending ? (val_a > val_b) : (val_a < val_b);
+                    }
+                }, a->get_values()[order_idx], b->get_values()[order_idx]);
+                return res;
+            });
+        }
 
-                for (const auto& v : r.get_values()) {
-                    std::visit([](auto&& arg) {
-                        std::cout << arg << " ";
-                    }, v);
-                }
-                std::cout << "\n";
+        std::vector<int> select_indices;
+        if (query.select_all) {
+            for (size_t i = 0; i < cols.size(); ++i) select_indices.push_back(i);
+        } else {
+            for (const auto& col_name : query.columns) {
+                int idx = get_col_idx(col_name, cols);
+                if (idx == -1) return "Error: Column not found in SELECT\n";
+                select_indices.push_back(idx);
             }
         }
 
-        cache.put(cache_key, result_rows);
+        std::string result;
+        for (const Row* r : matched_rows) {
+            for (size_t i = 0; i < select_indices.size(); ++i) {
+                std::visit([&](auto&& arg) {
+                    using T = std::decay_t<decltype(arg)>;
+                    if constexpr (std::is_same_v<T, std::string>) result += arg;
+                    else if constexpr (std::is_same_v<T, double>) result += formatDouble(arg);
+                    else result += std::to_string(arg);
+                }, r->get_values()[select_indices[i]]);
+                if (i < select_indices.size() - 1) result += " ";
+            }
+            result += "\n";
+        }
+        return result;
     }
 
-    // ------------------ HASH JOIN ------------------
-    else {
-        auto& left_table = db.get_table(query.table);
-        auto& right_table = db.get_table(query.join_table);
+    // --- INNER JOIN LOGIC ---
+    if (!db.has_table(query.join_table)) return "Error: Join table not found\n";
+    Table& right_table = db.get_table(query.join_table);
+    auto right_rows = right_table.get_all_rows();
+    const auto& right_cols = right_table.get_schema().get_columns();
 
-        auto left_rows = left_table.get_all_rows();
-        auto right_rows = right_table.get_all_rows();
+    int left_join_idx = get_col_idx(query.join_condition.left_column, cols);
+    int right_join_idx = get_col_idx(query.join_condition.right_column, right_cols);
+    if (left_join_idx == -1 || right_join_idx == -1) return "Error: Join condition column missing\n";
 
-        const auto& left_schema = left_table.get_schema();
-        const auto& right_schema = right_table.get_schema();
-
-        int left_idx = -1;
-        int right_idx = -1;
-
-        for (size_t i = 0; i < left_schema.get_columns().size(); i++) {
-            if (left_schema.get_columns()[i].name == query.join_condition.left_column) {
-                left_idx = i;
-                break;
-            }
-        }
-
-        for (size_t i = 0; i < right_schema.get_columns().size(); i++) {
-            if (right_schema.get_columns()[i].name == query.join_condition.right_column) {
-                right_idx = i;
-                break;
-            }
-        }
-
-        std::unordered_map<std::string, std::vector<Row>> hash_table;
-
-        for (const auto& r : right_rows) {
-            std::string key;
-
-            std::visit([&](auto&& arg) {
-                using T = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<T, std::string>) key = arg;
-                else key = std::to_string(arg);
-            }, r.get_values()[right_idx]);
-
-            hash_table[key].push_back(r);
-        }
-
-        for (const auto& lrow : left_rows) {
-            std::string key;
-
-            std::visit([&](auto&& arg) {
-                using T = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<T, std::string>) key = arg;
-                else key = std::to_string(arg);
-            }, lrow.get_values()[left_idx]);
-
-            if (hash_table.find(key) != hash_table.end()) {
-                for (const auto& rrow : hash_table[key]) {
-
-                    result_rows.push_back(lrow);
-
-                    for (const auto& v : lrow.get_values()) {
-                        std::visit([](auto&& arg) {
-                            std::cout << arg << " ";
-                        }, v);
-                    }
-
-                    for (const auto& v : rrow.get_values()) {
-                        std::visit([](auto&& arg) {
-                            std::cout << arg << " ";
-                        }, v);
-                    }
-
-                    std::cout << "\n";
-                }
-            }
-        }
-
-        cache.put(cache_key, result_rows);
+    std::unordered_map<std::string, std::vector<const Row*>> hash_join;
+    for (const auto& r : right_rows) {
+        std::string key;
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, std::string>) key = arg;
+            else if constexpr (std::is_same_v<T, double>) key = formatDouble(arg);
+            else key = std::to_string(arg);
+        }, r.get_values()[right_join_idx]);
+        hash_join[key].push_back(&r);
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
-    std::cout << "Time: "
-              << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
-              << " us\n";
+    std::vector<std::pair<int, bool>> select_layout; 
+    for (const auto& col_name : query.columns) {
+        std::string table_prefix = col_name.substr(0, col_name.find('.'));
+        std::string raw_col = col_name.substr(col_name.find('.') + 1);
+        
+        int idx = -1;
+        bool is_left = true;
+        if (table_prefix == query.table) idx = get_col_idx(raw_col, cols);
+        else { idx = get_col_idx(raw_col, right_cols); is_left = false; }
+        
+        if (idx == -1) return "Error: Column not found in SELECT\n";
+        select_layout.push_back({idx, is_left});
+    }
+
+    int join_where_idx = -1;
+    bool join_where_is_left = true;
+    double j_where_num = 0;
+    if (query.has_where) {
+        std::string table_prefix = query.where.column.substr(0, query.where.column.find('.'));
+        std::string raw_col = query.where.column.substr(query.where.column.find('.') + 1);
+        
+        if (table_prefix == query.table) { join_where_idx = get_col_idx(raw_col, cols); } 
+        else { join_where_idx = get_col_idx(raw_col, right_cols); join_where_is_left = false; }
+        
+        if (join_where_idx == -1) return "Error: Column not found in WHERE\n";
+        j_where_num = std::stod(query.where.value);
+    }
+    
+    int join_order_idx = -1;
+    bool join_order_is_left = true;
+    if (query.has_order_by) {
+        std::string table_prefix = query.order_by.column.substr(0, query.order_by.column.find('.'));
+        std::string raw_col = query.order_by.column.substr(query.order_by.column.find('.') + 1);
+        
+        if (table_prefix == query.table) { join_order_idx = get_col_idx(raw_col, cols); } 
+        else { join_order_idx = get_col_idx(raw_col, right_cols); join_order_is_left = false; }
+        
+        if (join_order_idx == -1) return "Error: Column not found in ORDER BY\n";
+    }
+
+    struct JoinedRow { const Row* left; const Row* right; };
+    std::vector<JoinedRow> joined_results;
+
+    for (const auto& l_row : rows) {
+        std::string key;
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, std::string>) key = arg;
+            else if constexpr (std::is_same_v<T, double>) key = formatDouble(arg);
+            else key = std::to_string(arg);
+        }, l_row.get_values()[left_join_idx]);
+
+        if (hash_join.count(key)) {
+            for (const Row* r_row : hash_join[key]) {
+                bool match = true;
+                if (query.has_where) {
+                    const Row* target_row = join_where_is_left ? &l_row : r_row;
+                    std::visit([&](auto&& arg) {
+                        using T = std::decay_t<decltype(arg)>;
+                        if constexpr (std::is_same_v<T, double> || std::is_same_v<T, int> || std::is_same_v<T, long long>) {
+                            double val = static_cast<double>(arg);
+                            if (query.where.op == "=" && val != j_where_num) match = false;
+                            else if (query.where.op == ">" && val <= j_where_num) match = false;
+                            else if (query.where.op == ">=" && val < j_where_num) match = false;
+                        }
+                    }, target_row->get_values()[join_where_idx]);
+                }
+                if (match) joined_results.push_back({&l_row, r_row});
+            }
+        }
+    }
+    
+    if (query.has_order_by) {
+        std::sort(joined_results.begin(), joined_results.end(), [&](const JoinedRow& a, const JoinedRow& b) {
+            bool res = false;
+            const Row* target_a = join_order_is_left ? a.left : a.right;
+            const Row* target_b = join_order_is_left ? b.left : b.right;
+            
+            std::visit([&](auto&& val_a, auto&& val_b) {
+                using T_A = std::decay_t<decltype(val_a)>;
+                using T_B = std::decay_t<decltype(val_b)>;
+                if constexpr (std::is_same_v<T_A, T_B>) {
+                    res = query.order_by.descending ? (val_a > val_b) : (val_a < val_b);
+                }
+            }, target_a->get_values()[join_order_idx], target_b->get_values()[join_order_idx]);
+            return res;
+        });
+    }
+
+    std::string result;
+    for (const auto& j_row : joined_results) {
+        for (size_t i = 0; i < select_layout.size(); ++i) {
+            const Row* target = select_layout[i].second ? j_row.left : j_row.right;
+            std::visit([&](auto&& arg) {
+                using T = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<T, std::string>) result += arg;
+                else if constexpr (std::is_same_v<T, double>) result += formatDouble(arg);
+                else result += std::to_string(arg);
+            }, target->get_values()[select_layout[i].first]);
+            
+            if (i < select_layout.size() - 1) result += " ";
+        }
+        result += "\n";
+    }
+
+    return result;
 }

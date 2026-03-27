@@ -42,6 +42,21 @@ std::vector<Row> Table::get_all_rows() const {
 const Schema& Table::get_schema() const {
     return schema;
 }
+
 std::vector<Row> Table::get_rows_by_index(const std::string& key) {
     return index.search(key);
+}
+
+// --------- DELETE ---------
+int Table::delete_all_rows() {
+    int count = rows.size();
+    
+    // Clear the physical rows
+    rows.clear();
+    
+    // Reset the index by re-instantiating it, 
+    // avoiding the need to modify index.h!
+    index = HashIndex(); 
+    
+    return count;
 }

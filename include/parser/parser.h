@@ -1,6 +1,6 @@
 #pragma once
-#include "tokenizer.h"
-#include "ast.h"
+#include "parser/tokenizer.h"
+#include "parser/ast.h"
 
 class Parser {
 public:
@@ -10,7 +10,7 @@ public:
 
 private:
     std::vector<Token> tokens;
-    int pos;
+    size_t pos; // Changed from int to size_t to prevent compiler warnings
 
     Token peek();
     Token get();
@@ -19,6 +19,9 @@ private:
     Query parseSelect();
     Query parseInsert();
     Query parseCreate();
+    
+    // NEW: Added to support the DELETE parsing logic
+    Query parseDelete(); 
 
     Condition parseWhere();
 };
