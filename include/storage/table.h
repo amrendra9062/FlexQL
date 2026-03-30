@@ -9,7 +9,7 @@ class Table {
 private:
     Schema schema;
     std::vector<Row> rows;
-    HashIndex index;   // index on first column
+    Index index;   // index on first column
 
 public:
     Table(const Schema& schema);

@@ -1,4 +1,5 @@
 #include "query/executor.h"
+#include "index/index.h" // <-- Required for the B+ Tree
 #include <ctime>
 #include <algorithm>
 #include <iostream>
@@ -116,27 +117,57 @@ std::string Executor::executeSelect(const SelectQuery& query) {
         }
 
         std::vector<const Row*> matched_rows;
-        for (const auto& r : rows) {
-            bool match = true;
-            if (query.has_where) {
+
+        // [ NEW: B+ TREE RANGE QUERY ACTIVATION ]
+        if (query.has_where && (query.where.op == ">" || query.where.op == "<" || query.where.op == ">=" || query.where.op == "<=")) {
+            Index range_index; // Creates the B+ Tree
+            
+            // Build the tree for the queried column
+            for (const auto& r : rows) {
+                double val = 0;
                 std::visit([&](auto&& arg) {
                     using T = std::decay_t<decltype(arg)>;
                     if constexpr (std::is_same_v<T, double> || std::is_same_v<T, int> || std::is_same_v<T, long long>) {
-                        double val = static_cast<double>(arg);
-                        if (query.where.op == "=" && val != where_val_num) match = false;
-                        else if (query.where.op == ">" && val <= where_val_num) match = false;
-                        else if (query.where.op == "<" && val >= where_val_num) match = false;
-                        else if (query.where.op == ">=" && val < where_val_num) match = false;
-                        else if (query.where.op == "<=" && val > where_val_num) match = false;
-                    } 
-                    else if constexpr (std::is_same_v<T, std::string>) {
-                        if (query.where.op == "=" && arg != where_val_str) match = false;
+                        val = static_cast<double>(arg);
                     }
                 }, r.get_values()[where_idx]);
+                range_index.insert(val, &r);
             }
-            if (match) matched_rows.push_back(&r);
+
+            // Define the bounds based on the SQL operator
+            double min_bound = -999999999.0;
+            double max_bound = 999999999.0;
+            bool inc_min = false, inc_max = false;
+
+            if (query.where.op == ">")  { min_bound = where_val_num; inc_min = false; }
+            if (query.where.op == ">=") { min_bound = where_val_num; inc_min = true;  }
+            if (query.where.op == "<")  { max_bound = where_val_num; inc_max = false; }
+            if (query.where.op == "<=") { max_bound = where_val_num; inc_max = true;  }
+
+            // Execute the O(log N) tree traversal
+            matched_rows = range_index.range_query(min_bound, max_bound, inc_min, inc_max);
+
+        } else {
+            // [ FALLBACK: LINEAR SCAN FOR '=' OR STRINGS ]
+            for (const auto& r : rows) {
+                bool match = true;
+                if (query.has_where) {
+                    std::visit([&](auto&& arg) {
+                        using T = std::decay_t<decltype(arg)>;
+                        if constexpr (std::is_same_v<T, double> || std::is_same_v<T, int> || std::is_same_v<T, long long>) {
+                            double val = static_cast<double>(arg);
+                            if (query.where.op == "=" && val != where_val_num) match = false;
+                        } 
+                        else if constexpr (std::is_same_v<T, std::string>) {
+                            if (query.where.op == "=" && arg != where_val_str) match = false;
+                        }
+                    }, r.get_values()[where_idx]);
+                }
+                if (match) matched_rows.push_back(&r);
+            }
         }
 
+        // --- ORDER BY LOGIC ---
         int order_idx = -1;
         if (query.has_order_by) {
             order_idx = get_col_idx(query.order_by.column, cols);
@@ -154,6 +185,7 @@ std::string Executor::executeSelect(const SelectQuery& query) {
             });
         }
 
+        // --- SELECT RESULTS FORMATTING ---
         std::vector<int> select_indices;
         if (query.select_all) {
             for (size_t i = 0; i < cols.size(); ++i) select_indices.push_back(i);

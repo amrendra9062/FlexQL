@@ -5,25 +5,18 @@
 Table::Table(const Schema& schema) : schema(schema) {}
 
 void Table::insert(const Row& row) {
+    // 1. Validate the row matches the table schema
     if (row.get_values().size() != schema.column_count()) {
         throw std::runtime_error("Column count mismatch");
     }
 
+    // 2. Insert the row into physical memory
     rows.push_back(row);
 
-    // --------- INDEX UPDATE ---------
-    std::string key;
-
-    std::visit([&](auto&& arg) {
-        using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, std::string>) {
-            key = arg;
-        } else {
-            key = std::to_string(arg);
-        }
-    }, row.get_values()[0]); // first column (id)
-
-    index.insert(key, row);
+    // NOTE: We intentionally removed the index.insert() call here!
+    // As discussed, storing pointers to a std::vector while it is actively 
+    // growing and reallocating memory will cause a dangling pointer crash. 
+    // The Executor now handles the B+ Tree safely on the fly.
 }
 
 std::vector<Row> Table::get_all_rows() const {
@@ -43,8 +36,13 @@ const Schema& Table::get_schema() const {
     return schema;
 }
 
+// --------- LEGACY INDEX FALLBACK ---------
+// Because we upgraded to a B+ Tree that uses range_query() instead of search(),
+// this old Hash Index function is no longer used by the Executor. 
+// We return an empty vector here just to satisfy the compiler if table.h still declares it.
 std::vector<Row> Table::get_rows_by_index(const std::string& key) {
-    return index.search(key);
+    (void)key; // Suppress unused variable warning
+    return {}; 
 }
 
 // --------- DELETE ---------
@@ -54,9 +52,8 @@ int Table::delete_all_rows() {
     // Clear the physical rows
     rows.clear();
     
-    // Reset the index by re-instantiating it, 
-    // avoiding the need to modify index.h!
-    index = HashIndex(); 
+    // Reset the index by re-instantiating it
+    index = Index(); 
     
     return count;
 }
