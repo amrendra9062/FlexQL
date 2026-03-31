@@ -7,7 +7,7 @@ It is designed as a hybrid system that combines the extreme speed of **in-memory
 
 ---
 
-## 🚀 What is FlexQL?
+### What is FlexQL
 
 FlexQL is an in-memory database management system (IMDBMS) developed to support high-throughput analytical queries.  
 By utilizing a **row-major storage model**, the engine ensures sub-millisecond query response times.
@@ -16,7 +16,7 @@ Unlike standard volatile systems, FlexQL implements a **Write-Ahead Log (WAL)** 
 
 ---
 
-## 🛠️ Implementation Overview
+## Implementation Overview
 
 - **Storage Model:**  
   Uses a row-major format (`std::vector<Row>`) to optimize CPU cache locality during full table scans.
@@ -38,7 +38,7 @@ Unlike standard volatile systems, FlexQL implements a **Write-Ahead Log (WAL)** 
 
 ---
 
-## 📈 How to Run FlexQL
+## How to Run FlexQL
 
 ### 1. Prerequisites
 
